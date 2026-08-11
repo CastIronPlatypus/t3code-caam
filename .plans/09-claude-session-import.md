@@ -187,11 +187,23 @@ session_id` (covers both "T3 already owns it" and "already imported"), OR if the
 scan-cache already recorded this `(session_id, size, mtime)`. A completed session
 file is immutable once its process exits, so the cache makes re-scans nearly free.
 
-### Project association
+### Project association (no auto-creation)
 
-Read each transcript's `cwd`. Find the T3 project whose workspace root == that
-`cwd`. If none exists, create one via `project.create` (exact command in
-`recon-orchestration.md`). Threads created by the importer attach to that project.
+Read each transcript's `cwd`. Find the T3 project whose workspace root **exactly
+equals** that `cwd` (`ProjectionSnapshotQuery.getActiveProjectByWorkspaceRoot`).
+If one exists, the imported thread attaches to it. If **none** exists, the
+transcript is **skipped** (and not cached, so it's re-checked later) — the importer
+never auto-creates T3 projects from transcript cwds.
+
+Rationale: the user's model is "when I open/have a project, recognize its
+sessions." Auto-creating a T3 project for every cwd that happens to have Claude
+history would surface projects the user never added. Project creation stays the
+user's action (or a natively-created project), which is exactly what the
+`project.created` reactor keys on.
+
+Known limitation (surfaced): a Claude session launched from a *subdirectory* of the
+project root won't match (exact-match only) and is skipped, rather than risk
+mis-assigning a session to the wrong project.
 
 ### Model selection
 
