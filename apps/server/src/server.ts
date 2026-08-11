@@ -58,6 +58,8 @@ import { ProviderRuntimeIngestionLive } from "./orchestration/Layers/ProviderRun
 import { ProviderCommandReactorLive } from "./orchestration/Layers/ProviderCommandReactor.ts";
 import { CheckpointReactorLive } from "./orchestration/Layers/CheckpointReactor.ts";
 import { ThreadDeletionReactorLive } from "./orchestration/Layers/ThreadDeletionReactor.ts";
+import { ClaudeImportReactorLive } from "./orchestration/Layers/ClaudeImportReactor.ts";
+import { layer as ClaudeSessionImportServiceLive } from "./import/ClaudeSessionImportService.ts";
 import * as AgentAwarenessRelay from "./relay/AgentAwarenessRelay.ts";
 import { hasCloudPublicConfig } from "./cloud/publicConfig.ts";
 import { ProviderRegistryLive } from "./provider/Layers/ProviderRegistry.ts";
@@ -164,6 +166,14 @@ const BackgroundLayerLive = BackgroundPolicy.layer.pipe(
 
 const UsageLayerLive = UsageService.layer.pipe(Layer.provide(ServerSettingsLayerLive));
 
+// The Claude session import service dispatches into the shared orchestration
+// engine and reads the shared projection store, so it must consume the same
+// runtime instances rather than build its own graph. Its build-time deps
+// (OrchestrationEngine/EventStore/ProjectionPipeline/ProjectionSnapshotQuery,
+// ProviderSessionDirectory, NodeServices, ServerConfig) are provided by the
+// surrounding runtime graph at its merge point in `RuntimeCoreDependenciesLive`.
+const ClaudeSessionImportLayerLive = ClaudeSessionImportServiceLive;
+
 const ResourceDiagnosticsLayerLive = Layer.mergeAll(
   ResourceTelemetryLayerLive,
   ProcessDiagnostics.layer.pipe(Layer.provide(ResourceTelemetryLayerLive)),
@@ -242,6 +252,7 @@ const ReactorLayerLive = Layer.empty.pipe(
   Layer.provideMerge(ProviderCommandReactorLive),
   Layer.provideMerge(CheckpointReactorLive),
   Layer.provideMerge(ThreadDeletionReactorLive),
+  Layer.provideMerge(ClaudeImportReactorLive),
   Layer.provideMerge(AgentAwarenessRelay.layer.pipe(Layer.provide(ServerSecretStore.layer))),
   Layer.provideMerge(RuntimeReceiptBusLive),
 );
@@ -372,7 +383,16 @@ const RuntimeCoreDependenciesLive = ReactorLayerLive.pipe(
   Layer.provideMerge(SourceControlProviderRegistryLayerLive),
   Layer.provideMerge(GitLayerLive),
   Layer.provideMerge(VcsLayerLive),
-  Layer.provideMerge(ProviderRuntimeLayerLive),
+  // Fold the Claude import service into the orchestration/provider merge so it
+  // consumes those shared runtime instances (rather than building its own
+  // graph), while keeping this pipe within its 20-argument overload limit.
+  // `ProviderRuntimeLayerLive` provides the import service's build-time deps
+  // (OrchestrationEngine/EventStore/ProjectionPipeline/ProjectionSnapshotQuery
+  // + ProviderSessionDirectory); NodeServices/ServerConfig leak to the outer
+  // runtime graph as before.
+  Layer.provideMerge(
+    ClaudeSessionImportLayerLive.pipe(Layer.provideMerge(ProviderRuntimeLayerLive)),
+  ),
   Layer.provideMerge(Layer.mergeAll(TerminalLayerLive, PreviewLayerLive)),
   Layer.provideMerge(PersistenceLayerLive),
   Layer.provideMerge(Keybindings.layer),

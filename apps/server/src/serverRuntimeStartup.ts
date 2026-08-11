@@ -7,6 +7,7 @@ import {
   ProviderInstanceId,
   ThreadId,
 } from "@t3tools/contracts";
+import * as Cause from "effect/Cause";
 import * as Console from "effect/Console";
 import * as Context from "effect/Context";
 import * as Crypto from "effect/Crypto";
@@ -28,6 +29,7 @@ import * as ExternalLauncher from "./process/externalLauncher.ts";
 import * as OrchestrationEngine from "./orchestration/Services/OrchestrationEngine.ts";
 import * as ProjectionSnapshotQuery from "./orchestration/Services/ProjectionSnapshotQuery.ts";
 import * as OrchestrationReactor from "./orchestration/Services/OrchestrationReactor.ts";
+import { ClaudeSessionImportService } from "./import/ClaudeSessionImportService.ts";
 import * as ServerLifecycleEvents from "./serverLifecycleEvents.ts";
 import * as ServerSettings from "./serverSettings.ts";
 import * as AnalyticsService from "./telemetry/AnalyticsService.ts";
@@ -307,6 +309,7 @@ export const make = (options?: StartupOptions) =>
     const serverEnvironment = yield* ServerEnvironment.ServerEnvironment;
     const crypto = yield* Crypto.Crypto;
     const launcher = yield* ServiceLauncherClient.ServiceLauncherClient;
+    const claudeImport = yield* ClaudeSessionImportService;
 
     const commandGate = yield* makeCommandGate;
     const httpListening = yield* Deferred.make<void>();
@@ -352,6 +355,22 @@ export const make = (options?: StartupOptions) =>
           yield* orchestrationReactor.start().pipe(Scope.provide(reactorScope));
           yield* providerSessionReaper.start().pipe(Scope.provide(reactorScope));
         }),
+      );
+
+      // Best-effort backfill of pre-existing Claude CLI transcripts for any
+      // project whose workspace root already exists. `runFullScan` swallows
+      // its own per-file failures; the `catchCause` is belt-and-suspenders so
+      // a catastrophic failure can never abort boot. It is cached and cheap on
+      // re-scan, so blocking the boot phase is acceptable.
+      yield* runStartupPhase(
+        "claude-import.backfill",
+        claudeImport.runFullScan().pipe(
+          Effect.catchCause((cause) =>
+            Effect.logWarning("claude import backfill failed", {
+              cause: Cause.pretty(cause),
+            }),
+          ),
+        ),
       );
 
       const welcomeBase = yield* resolveWelcomeBase;
