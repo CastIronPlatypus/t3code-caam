@@ -56,6 +56,15 @@
  * `agentId`/`parentToolUseId` without inventing ids. The results satisfy the real
  * `OrchestrationThreadActivity` schema.
  *
+ * ## Thread title derivation
+ *
+ * The thread title is NOT the first user message verbatim: in real transcripts
+ * the first user "message" is frequently system-injected noise (a slash-command
+ * envelope, a `<system-reminder>`, harness chatter). {@link deriveThreadTitle}
+ * instead uses the first genuine human prompt (cleaned of surrounding tags,
+ * collapsed to one line, truncated on a word boundary), falling back to a
+ * slash-command name and then to {@link DEFAULT_IMPORT_TITLE}.
+ *
  * @module ImportTranslator
  */
 
@@ -83,7 +92,7 @@ import type {
 export const DEFAULT_IMPORT_TITLE = "Imported Claude session";
 
 /** Max characters for a derived thread title before it is truncated. */
-const TITLE_MAX_CHARS = 80;
+const TITLE_MAX_CHARS = 60;
 
 /** Max characters for an activity `detail`/`summary` string before truncation. */
 const DETAIL_MAX_CHARS = 2000;
@@ -207,15 +216,110 @@ function truncate(value: string, max: number): string {
   return value.length > max ? `${value.slice(0, max)}…` : value;
 }
 
-/** Derives a single-line, truncated thread title from the first user prompt. */
-function deriveTitle(conversation: ImportedConversation): string {
-  for (const turn of conversation.turns) {
-    const text = turn.userMessage.text.trim();
-    if (text.length > 0) {
-      const oneLine = text.replace(/\s+/g, " ").trim();
-      return truncate(oneLine, TITLE_MAX_CHARS);
-    }
+/**
+ * Truncates a title to `max` chars on a word boundary, appending "…" when it had
+ * to cut. Prefers cutting at the last space inside the window; falls back to a
+ * hard cut when the window holds no space.
+ */
+function truncateOnWordBoundary(value: string, max: number): string {
+  if (value.length <= max) return value;
+  const window = value.slice(0, max);
+  const lastSpace = window.lastIndexOf(" ");
+  const cut = lastSpace > 0 ? window.slice(0, lastSpace) : window;
+  return `${cut.trimEnd()}…`;
+}
+
+/**
+ * Text shapes that are NOT genuine human prompts and must be skipped when
+ * choosing a thread title. Matched against the trimmed user-message text.
+ */
+const NON_PROMPT_PREFIXES = [
+  // Slash-command envelopes.
+  "<command-name>",
+  "<command-message>",
+  // System injections.
+  "<task-notification>",
+  "<system-reminder>",
+  "<bash-stdout>",
+  "<bash-stderr>",
+  "<local-command-stderr>",
+  // Harness / system lines.
+  "Caveat: The messages below",
+  "[Request interrupted",
+  "[SYSTEM NOTIFICATION",
+] as const;
+
+const BACKGROUND_AGENT_STOPPED = /^Background agent ".*" was stopped/;
+
+/**
+ * True when `text` is a genuine human prompt — i.e. it is non-empty and matches
+ * none of the slash-command / system-injection / harness noise shapes that the
+ * Claude CLI injects as pseudo user messages.
+ */
+function isGenuinePrompt(text: string): boolean {
+  const trimmed = text.trim();
+  if (trimmed.length === 0) return false;
+  if (trimmed.includes("<local-command-stdout>")) return false;
+  for (const prefix of NON_PROMPT_PREFIXES) {
+    if (trimmed.startsWith(prefix)) return false;
   }
+  if (BACKGROUND_AGENT_STOPPED.test(trimmed)) return false;
+  return true;
+}
+
+/** Strips surrounding XML-ish tags and collapses internal whitespace to spaces. */
+function cleanPromptText(text: string): string {
+  return text
+    .trim()
+    .replace(/^(?:<[^>]+>\s*)+/, "")
+    .replace(/(?:\s*<\/[^>]+>)+$/, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+/**
+ * Extracts a slash-command name from a user message, e.g. `graphify` from a
+ * `<command-name>/graphify</command-name>` envelope or a leading `/graphify`.
+ */
+function extractCommandName(text: string): string | undefined {
+  const trimmed = text.trim();
+  const tagMatch = trimmed.match(/<command-name>\s*\/?([^<\s]+)\s*<\/command-name>/);
+  if (tagMatch?.[1] !== undefined && tagMatch[1].length > 0) return tagMatch[1];
+  const leadingMatch = trimmed.match(/^\/([A-Za-z0-9_-]+)/);
+  if (leadingMatch?.[1] !== undefined && leadingMatch[1].length > 0) return leadingMatch[1];
+  return undefined;
+}
+
+/**
+ * Derives a single-line thread title for an imported Claude session.
+ *
+ * The first user "message" in a real transcript is often system-injected noise
+ * (a slash-command envelope, a `<system-reminder>`, harness chatter), not a
+ * genuine human prompt, so using it verbatim yields garbage titles. Instead:
+ *
+ * 1. Scan turns in order and use the FIRST genuine human prompt (one that fails
+ *    none of the {@link isGenuinePrompt} skip rules), stripped of surrounding
+ *    XML-ish tags, collapsed to a single line, and truncated to
+ *    {@link TITLE_MAX_CHARS} on a word boundary (with a trailing "…" when cut).
+ * 2. If there is no genuine prompt but a user message is a slash command, use
+ *    the command name (e.g. `/graphify` → `graphify`).
+ * 3. Otherwise fall back to {@link DEFAULT_IMPORT_TITLE}.
+ *
+ * Always returns a non-empty, trimmed, single-line string.
+ */
+export function deriveThreadTitle(conversation: ImportedConversation): string {
+  for (const turn of conversation.turns) {
+    const text = turn.userMessage.text;
+    if (!isGenuinePrompt(text)) continue;
+    const cleaned = cleanPromptText(text);
+    if (cleaned.length > 0) return truncateOnWordBoundary(cleaned, TITLE_MAX_CHARS);
+  }
+
+  for (const turn of conversation.turns) {
+    const command = extractCommandName(turn.userMessage.text);
+    if (command !== undefined) return command;
+  }
+
   return DEFAULT_IMPORT_TITLE;
 }
 
@@ -363,7 +467,7 @@ export function buildImportPlan(
 
   const thread: ImportPlanThread = {
     threadId,
-    title: deriveTitle(conversation),
+    title: deriveThreadTitle(conversation),
     modelSelection,
     cwd: conversation.cwd,
     gitBranch: conversation.gitBranch,

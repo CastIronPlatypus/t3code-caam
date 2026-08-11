@@ -100,6 +100,83 @@ describe("buildImportPlan", () => {
     expect(plan.thread.title).toBe(DEFAULT_IMPORT_TITLE);
   });
 
+  it("skips a slash-command envelope and uses the first genuine prompt as the title", () => {
+    const plan = buildImportPlan(
+      conversation({
+        turns: [
+          turn({
+            userMessage: {
+              text: "<command-name>/model</command-name> <command-message>model</command-message>",
+              timestamp: "t0",
+              uuid: "u0",
+            },
+          }),
+          turn({
+            userMessage: {
+              text: "why can't t3code resume a session previously started by the user?",
+              timestamp: "t1",
+              uuid: "u1",
+            },
+          }),
+        ],
+      }),
+      OPTIONS,
+    );
+    expect(plan.thread.title).not.toContain("<");
+    expect(plan.thread.title).not.toContain("command-name");
+    expect(plan.thread.title).not.toContain("\n");
+    expect(plan.thread.title.startsWith("why can't t3code resume a session")).toBe(true);
+    expect(plan.thread.title.endsWith("…")).toBe(true);
+    expect(plan.thread.title.length).toBeLessThanOrEqual(61);
+  });
+
+  it("uses the slash-command name when every user message is command/system noise", () => {
+    const plan = buildImportPlan(
+      conversation({
+        turns: [
+          turn({
+            userMessage: {
+              text: "<system-reminder>context injected</system-reminder>",
+              timestamp: "t0",
+              uuid: "u0",
+            },
+          }),
+          turn({
+            userMessage: {
+              text: "<command-message>graphify</command-message> <command-name>/graphify</command-name>",
+              timestamp: "t1",
+              uuid: "u1",
+            },
+          }),
+          turn({
+            userMessage: {
+              text: "<local-command-stdout>done</local-command-stdout>",
+              timestamp: "t2",
+              uuid: "u2",
+            },
+          }),
+        ],
+      }),
+      OPTIONS,
+    );
+    expect(plan.thread.title).toBe("graphify");
+  });
+
+  it("cleans a multi-line, over-long genuine first prompt into a single truncated line", () => {
+    const longPrompt = `Please help me refactor the import translator so that\nthe derived title is never system noise and always a real prompt`;
+    const plan = buildImportPlan(
+      conversation({
+        turns: [turn({ userMessage: { text: longPrompt, timestamp: "t0", uuid: "u0" } })],
+      }),
+      OPTIONS,
+    );
+    expect(plan.thread.title).not.toContain("\n");
+    expect(plan.thread.title.trim()).toBe(plan.thread.title);
+    expect(plan.thread.title.endsWith("…")).toBe(true);
+    expect(plan.thread.title.length).toBeLessThanOrEqual(61); // 60 + ellipsis
+    expect(plan.thread.title.startsWith("Please help me refactor")).toBe(true);
+  });
+
   it("emits ordered ops with correct user/assistant text and ids for a multi-turn conversation", () => {
     const plan = buildImportPlan(
       conversation({
