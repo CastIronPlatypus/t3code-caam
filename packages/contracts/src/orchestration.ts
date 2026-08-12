@@ -22,6 +22,7 @@ import {
   TurnId,
 } from "./baseSchemas.ts";
 import { ProviderInstanceId } from "./providerInstance.ts";
+import { CaamProfileName } from "./caam.ts";
 
 export const ORCHESTRATION_WS_METHODS = {
   dispatchCommand: "orchestration.dispatchCommand",
@@ -663,6 +664,9 @@ const ThreadCreateCommand = Schema.Struct({
   ),
   branch: Schema.NullOr(TrimmedNonEmptyString),
   worktreePath: Schema.NullOr(TrimmedNonEmptyString),
+  // Selected caam account profile for this thread's provider. Absent/null =
+  // fall back to the server's per-project default (or no profile).
+  caamProfile: Schema.optional(Schema.NullOr(CaamProfileName)),
   createdAt: IsoDateTime,
 });
 
@@ -758,6 +762,8 @@ const ThreadMetaUpdateCommand = Schema.Struct({
   branch: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
   expectedBranch: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
   worktreePath: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
+  // Absent = leave unchanged; null = clear to the project default / no profile.
+  caamProfile: Schema.optional(Schema.NullOr(CaamProfileName)),
 }).check(
   Schema.makeFilter(
     (input) =>
@@ -790,6 +796,7 @@ const ThreadTurnStartBootstrapCreateThread = Schema.Struct({
   interactionMode: ProviderInteractionMode,
   branch: Schema.NullOr(TrimmedNonEmptyString),
   worktreePath: Schema.NullOr(TrimmedNonEmptyString),
+  caamProfile: Schema.optional(Schema.NullOr(CaamProfileName)),
   createdAt: IsoDateTime,
 });
 
@@ -826,6 +833,9 @@ export const ThreadTurnStartCommand = Schema.Struct({
   ),
   bootstrap: Schema.optional(ThreadTurnStartBootstrap),
   sourceProposedPlan: Schema.optional(SourceProposedPlanReference),
+  // Per-turn caam profile override. Absent = leave the thread's selection
+  // unchanged; null = clear to the project default / no profile.
+  caamProfile: Schema.optional(Schema.NullOr(CaamProfileName)),
   createdAt: IsoDateTime,
 });
 
@@ -845,6 +855,7 @@ const ClientThreadTurnStartCommand = Schema.Struct({
   interactionMode: ProviderInteractionMode,
   bootstrap: Schema.optional(ThreadTurnStartBootstrap),
   sourceProposedPlan: Schema.optional(SourceProposedPlanReference),
+  caamProfile: Schema.optional(Schema.NullOr(CaamProfileName)),
   createdAt: IsoDateTime,
 });
 
@@ -1240,6 +1251,9 @@ export const ThreadTurnStartRequestedPayload = Schema.Struct({
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_PROVIDER_INTERACTION_MODE)),
   ),
   sourceProposedPlan: Schema.optional(SourceProposedPlanReference),
+  // Selected caam account profile for this turn's provider session. Absent/null
+  // ⇒ server falls back to the per-project default (or no profile).
+  caamProfile: Schema.optional(Schema.NullOr(CaamProfileName)),
   createdAt: IsoDateTime,
 });
 

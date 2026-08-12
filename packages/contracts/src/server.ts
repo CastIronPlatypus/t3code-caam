@@ -18,6 +18,7 @@ import {
   ResolvedKeybindingsConfig,
 } from "./keybindings.ts";
 import { EditorId } from "./editor.ts";
+import { CaamProfilesSnapshot } from "./caam.ts";
 import { ModelCapabilities } from "./model.ts";
 import { ProviderDriverKind, ProviderInstanceId } from "./providerInstance.ts";
 import { ServerSettings } from "./settings.ts";
@@ -430,6 +431,12 @@ export const ServerConfig = Schema.Struct({
   availableEditors: ForwardCompatibleArray(EditorId),
   observability: ServerObservability,
   settings: ServerSettings,
+  /**
+   * caam profiles the server detected plus its per-project default mapping.
+   * Absent when caam is not installed / no profiles exist — clients then hide
+   * the account-profile picker entirely.
+   */
+  caam: Schema.optionalKey(CaamProfilesSnapshot),
   /** Whether shell subscriptions can emit an opt-in catch-up completion marker. */
   shellResumeCompletionMarker: Schema.optionalKey(Schema.Boolean),
   /** Whether thread subscriptions can emit an opt-in catch-up completion marker. */

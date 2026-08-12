@@ -21,7 +21,12 @@ import {
   ProviderUserInputAnswers,
   RuntimeMode,
 } from "./orchestration.ts";
-import { ProviderInstanceId, ProviderDriverKind } from "./providerInstance.ts";
+import {
+  ProviderInstanceId,
+  ProviderDriverKind,
+  ProviderInstanceEnvironment,
+} from "./providerInstance.ts";
+import { CaamProfileName } from "./caam.ts";
 
 const ProviderSessionStatus = Schema.Literals([
   "connecting",
@@ -61,6 +66,11 @@ export const ProviderSessionStartInput = Schema.Struct({
   approvalPolicy: Schema.optional(ProviderApprovalPolicy),
   sandboxMode: Schema.optional(ProviderSandboxMode),
   runtimeMode: RuntimeMode,
+  // The resolved caam profile for this session (thread selection or project
+  // default), and the environment caam reports for it. `caamEnvironment` is
+  // merged into the provider process env at spawn to run under that account.
+  caamProfile: Schema.optional(Schema.NullOr(CaamProfileName)),
+  caamEnvironment: Schema.optional(ProviderInstanceEnvironment),
 });
 export type ProviderSessionStartInput = typeof ProviderSessionStartInput.Type;
 
