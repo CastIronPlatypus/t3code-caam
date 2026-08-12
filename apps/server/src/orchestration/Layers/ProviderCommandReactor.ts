@@ -5,6 +5,7 @@ import {
   type ModelSelection,
   type OrchestrationEvent,
   ProviderDriverKind,
+  type ProviderInstanceEnvironment,
   type ProjectId,
   type OrchestrationSession,
   ThreadId,
@@ -25,6 +26,7 @@ import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import { makeDrainableWorker } from "@t3tools/shared/DrainableWorker";
 
+import { CaamService, caamToolForDriverKind } from "../../caam/CaamService.ts";
 import { resolveThreadWorkspaceCwd } from "../../checkpointing/Utils.ts";
 import { increment, orchestrationEventsProcessedTotal } from "../../observability/Metrics.ts";
 import { ProviderAdapterRequestError } from "../../provider/Errors.ts";
@@ -316,6 +318,7 @@ const make = Effect.gen(function* () {
   const projectionSnapshotQuery = yield* ProjectionSnapshotQuery;
   const providerService = yield* ProviderService;
   const providerRegistry = yield* ProviderRegistry;
+  const caam = yield* CaamService;
   const gitWorkflow = yield* GitWorkflowService;
   const vcsStatusBroadcaster = yield* VcsStatusBroadcaster;
   const textGeneration = yield* TextGeneration;
@@ -337,6 +340,48 @@ const make = Effect.gen(function* () {
     );
 
   const threadModelSelections = new Map<string, ModelSelection>();
+  // Last caam profile a client requested for a thread (null = explicit
+  // "default"), and the profile the currently-live session was actually
+  // started under. A change between them forces a respawn (the account env
+  // binds at process spawn and cannot be switched in-session).
+  const threadCaamProfiles = new Map<string, string | null>();
+  const sessionStartedCaamProfiles = new Map<string, string | undefined>();
+
+  /**
+   * Resolve the effective caam profile + its environment for a session about to
+   * start on `driverKind` in `cwd`. Explicit non-empty selection wins; null /
+   * undefined fall back to the server's per-project default. Any caam failure
+   * degrades to "no profile" so a launch is never blocked.
+   */
+  const resolveCaamForSession = Effect.fnUntraced(function* (input: {
+    readonly threadId: ThreadId;
+    readonly driverKind: ProviderDriverKind;
+    readonly cwd: string | undefined;
+    readonly requested: string | null | undefined;
+  }) {
+    const tool = caamToolForDriverKind(String(input.driverKind));
+    if (tool === undefined) {
+      return { profile: undefined, environment: undefined } as const;
+    }
+    const requested =
+      input.requested !== undefined
+        ? input.requested
+        : (threadCaamProfiles.get(input.threadId) ?? undefined);
+    const profile =
+      typeof requested === "string" && requested.length > 0
+        ? requested
+        : yield* caam.resolveProjectDefault(input.cwd ?? process.cwd(), tool);
+    if (profile === undefined) {
+      return { profile: undefined, environment: undefined } as const;
+    }
+    const envRecord = yield* caam.resolveEnvironment(tool, profile);
+    const entries = Object.entries(envRecord);
+    const environment: ProviderInstanceEnvironment | undefined =
+      entries.length > 0
+        ? entries.map(([name, value]) => ({ name, value, sensitive: true }))
+        : undefined;
+    return { profile, environment } as const;
+  });
 
   const appendProviderFailureActivity = (input: {
     readonly threadId: ThreadId;
@@ -483,6 +528,7 @@ const make = Effect.gen(function* () {
     createdAt: string,
     options?: {
       readonly modelSelection?: ModelSelection;
+      readonly caamProfile?: string | null;
       readonly pendingTurnStart?: boolean;
     },
   ) {
@@ -617,6 +663,15 @@ const make = Effect.gen(function* () {
       projects: project ? [project] : [],
     });
 
+    const caamResolved = yield* resolveCaamForSession({
+      threadId,
+      driverKind: desiredInfo.driverKind,
+      cwd: effectiveCwd,
+      requested: options?.caamProfile,
+    });
+    const effectiveCaamProfile = caamResolved.profile;
+    const caamEnvironment = caamResolved.environment;
+
     const startProviderSession = (input?: {
       readonly resumeCursor?: unknown;
       readonly provider?: ProviderDriverKind;
@@ -629,6 +684,8 @@ const make = Effect.gen(function* () {
         modelSelection: desiredModelSelection,
         ...(input?.resumeCursor !== undefined ? { resumeCursor: input.resumeCursor } : {}),
         runtimeMode: desiredRuntimeMode,
+        ...(effectiveCaamProfile !== undefined ? { caamProfile: effectiveCaamProfile } : {}),
+        ...(caamEnvironment !== undefined ? { caamEnvironment } : {}),
       });
 
     const bindSessionToThread = (session: ProviderSession) =>
@@ -679,20 +736,28 @@ const make = Effect.gen(function* () {
         preferredProvider === "claudeAgent" &&
         requestedModelSelection !== undefined &&
         !Equal.equals(previousModelSelection, requestedModelSelection);
+      // The caam account env binds at spawn: switching profiles means a fresh
+      // process. Compare the resolved profile to what the live session started
+      // under.
+      const shouldRestartForCaamProfileChange =
+        (effectiveCaamProfile ?? undefined) !==
+        (sessionStartedCaamProfiles.get(threadId) ?? undefined);
 
       if (
         !runtimeModeChanged &&
         !cwdChanged &&
         !instanceChanged &&
         !shouldRestartForModelChange &&
-        !shouldRestartForModelSelectionChange
+        !shouldRestartForModelSelectionChange &&
+        !shouldRestartForCaamProfileChange
       ) {
         return existingSessionThreadId;
       }
 
-      const resumeCursor = shouldRestartForModelChange
-        ? undefined
-        : (activeSession?.resumeCursor ?? undefined);
+      const resumeCursor =
+        shouldRestartForModelChange || shouldRestartForCaamProfileChange
+          ? undefined
+          : (activeSession?.resumeCursor ?? undefined);
       yield* Effect.logInfo("provider command reactor restarting provider session", {
         threadId,
         existingSessionThreadId,
@@ -710,11 +775,14 @@ const make = Effect.gen(function* () {
         instanceChanged,
         shouldRestartForModelChange,
         shouldRestartForModelSelectionChange,
+        shouldRestartForCaamProfileChange,
+        caamProfile: effectiveCaamProfile,
         hasResumeCursor: resumeCursor !== undefined,
       });
       const restartedSession = yield* startProviderSession(
         resumeCursor !== undefined ? { resumeCursor } : undefined,
       );
+      sessionStartedCaamProfiles.set(threadId, effectiveCaamProfile);
       yield* Effect.logInfo("provider command reactor restarted provider session", {
         threadId,
         previousSessionId: existingSessionThreadId,
@@ -728,6 +796,7 @@ const make = Effect.gen(function* () {
     }
 
     const startedSession = yield* startProviderSession(undefined);
+    sessionStartedCaamProfiles.set(threadId, effectiveCaamProfile);
     yield* bindSessionToThread(startedSession);
     return startedSession.threadId;
   });
@@ -737,6 +806,7 @@ const make = Effect.gen(function* () {
     readonly messageText: string;
     readonly attachments?: ReadonlyArray<ChatAttachment>;
     readonly modelSelection?: ModelSelection;
+    readonly caamProfile?: string | null;
     readonly interactionMode?: "default" | "plan";
     readonly createdAt: string;
   }) {
@@ -746,8 +816,14 @@ const make = Effect.gen(function* () {
         new Error(`Thread '${input.threadId}' was not found in read model.`),
       );
     }
+    // Remember the requested profile before starting the session so the
+    // resolution inside ensureSessionForThread and any later steer sees it.
+    if (input.caamProfile !== undefined) {
+      threadCaamProfiles.set(input.threadId, input.caamProfile);
+    }
     yield* ensureSessionForThread(input.threadId, input.createdAt, {
       ...(input.modelSelection !== undefined ? { modelSelection: input.modelSelection } : {}),
+      ...(input.caamProfile !== undefined ? { caamProfile: input.caamProfile } : {}),
       pendingTurnStart: true,
     });
     if (input.modelSelection !== undefined) {
@@ -1167,6 +1243,9 @@ const make = Effect.gen(function* () {
       ...(message.attachments !== undefined ? { attachments: message.attachments } : {}),
       ...(event.payload.modelSelection !== undefined
         ? { modelSelection: event.payload.modelSelection }
+        : {}),
+      ...(event.payload.caamProfile !== undefined
+        ? { caamProfile: event.payload.caamProfile }
         : {}),
       interactionMode: event.payload.interactionMode,
       createdAt: event.payload.createdAt,

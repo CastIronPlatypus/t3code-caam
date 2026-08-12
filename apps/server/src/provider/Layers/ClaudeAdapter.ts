@@ -77,6 +77,7 @@ import { ServerConfig } from "../../config.ts";
 import * as McpProviderSession from "../../mcp/McpProviderSession.ts";
 import { resolveClaudeSdkExecutablePath } from "../Drivers/ClaudeExecutable.ts";
 import { makeClaudeEnvironment } from "../Drivers/ClaudeHome.ts";
+import { mergeProviderInstanceEnvironment } from "../ProviderInstanceEnvironment.ts";
 import {
   getClaudeModelCapabilities,
   isClaudeUltracodeEffort,
@@ -4120,7 +4121,10 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         ...(newSessionId ? { sessionId: newSessionId } : {}),
         includePartialMessages: true,
         canUseTool,
-        env: claudeEnvironment,
+        // Overlay the resolved caam profile env (HOME/XDG_CONFIG_HOME/
+        // CLAUDE_CONFIG_DIR) so the SDK's child runs under that account. A
+        // no-op when no profile is selected (returns claudeEnvironment as-is).
+        env: mergeProviderInstanceEnvironment(input.caamEnvironment, claudeEnvironment),
         additionalDirectories,
         ...(Object.keys(extraArgs).length > 0 ? { extraArgs } : {}),
         ...(mcpSession
