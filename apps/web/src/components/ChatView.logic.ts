@@ -56,10 +56,19 @@ export function resolveThreadMetadataUpdateForNextTurn(input: {
   nextModelSelection?: ModelSelection;
   currentBranch: string | null;
   nextBranch?: string;
+  /**
+   * Current caam profile the server has for this thread, when known. The server
+   * does not echo the selection back, so callers usually leave this `undefined`
+   * — any provided `nextCaamProfile` then counts as a change to sync.
+   */
+  currentCaamProfile?: string | null;
+  /** Next caam profile (`null` = clear to default). Absent = leave unchanged. */
+  nextCaamProfile?: string | null;
 }): {
   modelSelection?: ModelSelection;
   branch?: string;
   worktreePath?: null;
+  caamProfile?: string | null;
 } | null {
   const nextModelSelection = input.nextModelSelection;
   const modelSelectionChanged =
@@ -69,12 +78,15 @@ export function resolveThreadMetadataUpdateForNextTurn(input: {
       JSON.stringify(nextModelSelection.options ?? null) !==
         JSON.stringify(input.currentModelSelection.options ?? null));
   const branchChanged = input.nextBranch !== undefined && input.nextBranch !== input.currentBranch;
-  if (!modelSelectionChanged && !branchChanged) {
+  const caamProfileChanged =
+    input.nextCaamProfile !== undefined && input.nextCaamProfile !== input.currentCaamProfile;
+  if (!modelSelectionChanged && !branchChanged && !caamProfileChanged) {
     return null;
   }
   return {
     ...(modelSelectionChanged ? { modelSelection: nextModelSelection } : {}),
     ...(branchChanged ? { branch: input.nextBranch, worktreePath: null } : {}),
+    ...(caamProfileChanged ? { caamProfile: input.nextCaamProfile } : {}),
   };
 }
 

@@ -235,6 +235,13 @@ const PersistedComposerDraftStoreState = Schema.Struct({
     Schema.Record(ProviderInstanceId, ModelSelection),
   ),
   stickyActiveProvider: Schema.optionalKey(Schema.NullOr(ProviderInstanceId)),
+  // Selected caam account profile per composer target (draft or server thread).
+  // `null` = explicit "Default account" (no profile). Absent = never chosen.
+  caamProfileByThread: Schema.optionalKey(
+    Schema.Record(Schema.String, Schema.NullOr(Schema.String)),
+  ),
+  // Sticky caam profile remembered for new threads (mirrors sticky model state).
+  stickyCaamProfile: Schema.optionalKey(Schema.NullOr(Schema.String)),
 });
 type PersistedComposerDraftStoreState = typeof PersistedComposerDraftStoreState.Type;
 
@@ -355,6 +362,14 @@ interface ComposerDraftStoreState {
   logicalProjectDraftThreadKeyByLogicalProjectKey: Record<string, string>;
   stickyModelSelectionByProvider: Partial<Record<ProviderInstanceId, ModelSelection>>;
   stickyActiveProvider: ProviderInstanceId | null;
+  /**
+   * Selected caam account profile keyed by composer target (draft session or
+   * server thread). `null` = explicit "Default account"; absent = never chosen
+   * (the effective read then falls back to {@link stickyCaamProfile}).
+   */
+  caamProfileByThread: Record<string, string | null>;
+  /** Sticky caam profile remembered for new threads (mirrors sticky model state). */
+  stickyCaamProfile: string | null;
   /** Returns the editable composer content for a draft session or server thread. */
   getComposerDraft: (target: ComposerThreadTarget) => ComposerThreadDraftState | null;
   /** Looks up the active draft session for a logical project identity. */
@@ -426,6 +441,10 @@ interface ComposerDraftStoreState {
   finalizePromotedDraftThread: (threadRef: ComposerThreadTarget) => void;
   clearDraftThread: (threadRef: ComposerThreadTarget) => void;
   setStickyModelSelection: (modelSelection: ModelSelection | null | undefined) => void;
+  /** Persist the caam profile selection for a draft session or server thread. */
+  setCaamProfile: (threadRef: ComposerThreadTarget, profile: string | null) => void;
+  /** Persist the sticky caam profile remembered for new threads. */
+  setStickyCaamProfile: (profile: string | null) => void;
   setPrompt: (threadRef: ComposerThreadTarget, prompt: string) => void;
   setTerminalContexts: (threadRef: ComposerThreadTarget, contexts: TerminalContextDraft[]) => void;
   setModelSelection: (
@@ -590,6 +609,8 @@ const EMPTY_PERSISTED_DRAFT_STORE_STATE = Object.freeze<PersistedComposerDraftSt
   logicalProjectDraftThreadKeyByLogicalProjectKey: {},
   stickyModelSelectionByProvider: {},
   stickyActiveProvider: null,
+  caamProfileByThread: {},
+  stickyCaamProfile: null,
 });
 
 const EMPTY_IMAGES: ComposerImageAttachment[] = [];
@@ -1801,6 +1822,26 @@ function normalizePersistedDraftsByThreadId(
   return nextDraftsByThreadKey;
 }
 
+/** Coerce a persisted caam profile value into `string | null`. */
+function normalizeCaamProfile(value: unknown): string | null {
+  return typeof value === "string" && value.length > 0 ? value : null;
+}
+
+/** Coerce a persisted per-thread caam profile map into a validated record. */
+function normalizeCaamProfileByThread(value: unknown): Record<string, string | null> {
+  if (!value || typeof value !== "object") {
+    return {};
+  }
+  const result: Record<string, string | null> = {};
+  for (const [threadKey, profile] of Object.entries(value as Record<string, unknown>)) {
+    if (threadKey.length === 0) {
+      continue;
+    }
+    result[threadKey] = normalizeCaamProfile(profile);
+  }
+  return result;
+}
+
 function migratePersistedComposerDraftStoreState(
   persistedState: unknown,
 ): PersistedComposerDraftStoreState {
@@ -1850,6 +1891,8 @@ function migratePersistedComposerDraftStoreState(
     logicalProjectDraftThreadKeyByLogicalProjectKey,
     stickyModelSelectionByProvider: compactModelSelectionByProvider(stickyModelSelectionByProvider),
     stickyActiveProvider,
+    caamProfileByThread: normalizeCaamProfileByThread(candidate.caamProfileByThread),
+    stickyCaamProfile: normalizeCaamProfile(candidate.stickyCaamProfile),
   };
 }
 
@@ -1977,6 +2020,11 @@ function partializeComposerDraftStoreState(
       state.stickyModelSelectionByProvider,
     ),
     stickyActiveProvider: state.stickyActiveProvider,
+    // Persisted as-is (no zombie pruning): server threads never echo their caam
+    // selection back to the client, so this map is the only place a reopened
+    // thread's picker value survives a reload.
+    caamProfileByThread: state.caamProfileByThread,
+    stickyCaamProfile: state.stickyCaamProfile,
   };
 }
 
@@ -2047,6 +2095,8 @@ function normalizeCurrentPersistedComposerDraftStoreState(
     logicalProjectDraftThreadKeyByLogicalProjectKey,
     stickyModelSelectionByProvider: compactModelSelectionByProvider(stickyModelSelectionByProvider),
     stickyActiveProvider,
+    caamProfileByThread: normalizeCaamProfileByThread(normalizedPersistedState.caamProfileByThread),
+    stickyCaamProfile: normalizeCaamProfile(normalizedPersistedState.stickyCaamProfile),
   };
 }
 
@@ -2247,6 +2297,8 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
         logicalProjectDraftThreadKeyByLogicalProjectKey: {},
         stickyModelSelectionByProvider: {},
         stickyActiveProvider: null,
+        caamProfileByThread: {},
+        stickyCaamProfile: null,
         getComposerDraft: (target) => getComposerDraftState(get(), target),
         getDraftThreadByLogicalProjectKey: (logicalProjectKey) => {
           return get().getDraftSessionByLogicalProjectKey(logicalProjectKey);
@@ -2607,6 +2659,31 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
               stickyActiveProvider: normalized.instanceId,
             };
           });
+        },
+        setCaamProfile: (threadRef, profile) => {
+          const threadKey = resolveComposerDraftKey(get(), threadRef) ?? "";
+          if (threadKey.length === 0) {
+            return;
+          }
+          const nextProfile = normalizeCaamProfile(profile);
+          set((state) => {
+            const current = state.caamProfileByThread[threadKey] ?? null;
+            if (threadKey in state.caamProfileByThread && current === nextProfile) {
+              return state;
+            }
+            return {
+              caamProfileByThread: {
+                ...state.caamProfileByThread,
+                [threadKey]: nextProfile,
+              },
+            };
+          });
+        },
+        setStickyCaamProfile: (profile) => {
+          const nextProfile = normalizeCaamProfile(profile);
+          set((state) =>
+            state.stickyCaamProfile === nextProfile ? state : { stickyCaamProfile: nextProfile },
+          );
         },
         applyStickyState: (threadRef) => {
           const threadKey = resolveComposerDraftKey(get(), threadRef) ?? "";
@@ -3504,6 +3581,8 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
             normalizedPersisted.logicalProjectDraftThreadKeyByLogicalProjectKey,
           stickyModelSelectionByProvider: normalizedPersisted.stickyModelSelectionByProvider ?? {},
           stickyActiveProvider: normalizedPersisted.stickyActiveProvider ?? null,
+          caamProfileByThread: normalizedPersisted.caamProfileByThread ?? {},
+          stickyCaamProfile: normalizedPersisted.stickyCaamProfile ?? null,
         };
       },
     },
@@ -3626,6 +3705,19 @@ export function useEffectiveComposerModelState(input: {
       input.threadModelSelection,
     ],
   );
+}
+
+/**
+ * Effective caam profile for a composer target: the target's stored selection
+ * when present, otherwise the sticky value (mirrors sticky model fallback).
+ * `null` = the "Default account" (no explicit profile).
+ */
+export function useEffectiveCaamProfile(threadRef: ComposerThreadTarget): string | null {
+  return useComposerDraftStore((state) => {
+    const threadKey = resolveComposerDraftKey(state, threadRef);
+    const stored = threadKey ? state.caamProfileByThread[threadKey] : undefined;
+    return stored ?? state.stickyCaamProfile ?? null;
+  });
 }
 
 /**

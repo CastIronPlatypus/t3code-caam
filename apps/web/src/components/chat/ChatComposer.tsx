@@ -12,6 +12,7 @@ import type {
   ThreadId,
 } from "@t3tools/contracts";
 import {
+  type CaamProfilesSnapshot,
   ProviderDriverKind,
   ProviderInstanceId,
   PROVIDER_SEND_TURN_MAX_ATTACHMENTS,
@@ -53,8 +54,15 @@ import {
   hydrateImagesFromPersisted,
   useComposerDraftStore,
   useComposerThreadDraft,
+  useEffectiveCaamProfile,
   useEffectiveComposerModelState,
 } from "../../composerDraftStore";
+import {
+  caamProfileNamesForTool,
+  caamProjectDefaultProfile,
+  caamToolForDriverKind,
+} from "../../caamProfiles";
+import { CaamProfilePicker } from "./CaamProfilePicker";
 import {
   MAX_STASH_ENTRIES,
   partitionStashAttachments,
@@ -483,6 +491,12 @@ export interface ChatComposerHandle {
     selectedProvider: ProviderDriverKind;
     selectedModel: string;
     selectedProviderModels: ReadonlyArray<ServerProvider["models"][number]>;
+    /**
+     * Effective caam account profile for this send (`null` = "Default account").
+     * Callers gate whether to forward it by re-deriving picker applicability
+     * from `selectedProvider` + the caam snapshot.
+     */
+    selectedCaamProfile: string | null;
   };
 }
 
@@ -547,6 +561,11 @@ export interface ChatComposerProps {
   providerStatuses: ServerProvider[];
   activeProjectDefaultModelSelection: ModelSelection | null | undefined;
   activeThreadModelSelection: ModelSelection | null | undefined;
+  /**
+   * caam profiles snapshot from the server config (`serverConfig.caam`).
+   * Absent ⇒ the account-profile picker is hidden entirely.
+   */
+  caamProfiles: CaamProfilesSnapshot | undefined;
 
   // Context window
   activeThreadActivities: Thread["activities"] | undefined;
@@ -637,6 +656,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     providerStatuses,
     activeProjectDefaultModelSelection,
     activeThreadModelSelection,
+    caamProfiles,
     activeThreadActivities,
     resolvedTheme,
     settings,
@@ -712,6 +732,9 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     (store) => store.syncPersistedAttachments,
   );
   const getComposerDraft = useComposerDraftStore((store) => store.getComposerDraft);
+  const setComposerCaamProfile = useComposerDraftStore((store) => store.setCaamProfile);
+  const setStickyCaamProfile = useComposerDraftStore((store) => store.setStickyCaamProfile);
+  const effectiveCaamProfile = useEffectiveCaamProfile(composerDraftTarget);
 
   // ------------------------------------------------------------------
   // Model state
@@ -831,6 +854,29 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   // disabled.
   const selectedProvider: ProviderDriverKind =
     selectedProviderEntry?.driverKind ?? requestedDriverKind;
+
+  // ------------------------------------------------------------------
+  // caam account-profile state
+  // ------------------------------------------------------------------
+  const caamTool = useMemo(() => caamToolForDriverKind(selectedProvider), [selectedProvider]);
+  const caamToolProfiles = useMemo(
+    () => caamProfileNamesForTool(caamProfiles, caamTool),
+    [caamProfiles, caamTool],
+  );
+  const caamProjectDefault = useMemo(
+    () => caamProjectDefaultProfile(caamProfiles, caamTool, gitCwd),
+    [caamProfiles, caamTool, gitCwd],
+  );
+  const caamPickerVisible = Boolean(
+    caamProfiles?.available && caamTool && caamToolProfiles.length > 0,
+  );
+  const onCaamProfileChange = useCallback(
+    (profile: string | null) => {
+      setComposerCaamProfile(composerDraftTarget, profile);
+      setStickyCaamProfile(profile);
+    },
+    [composerDraftTarget, setComposerCaamProfile, setStickyCaamProfile],
+  );
 
   const { modelOptions: composerModelOptions, selectedModel } = useEffectiveComposerModelState({
     threadRef: composerDraftTarget,
@@ -2615,6 +2661,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
         selectedProvider,
         selectedModel,
         selectedProviderModels,
+        selectedCaamProfile: effectiveCaamProfile,
       }),
     }),
     [
@@ -2643,6 +2690,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       selectedPromptEffort,
       selectedProvider,
       selectedProviderModels,
+      effectiveCaamProfile,
     ],
   );
 
@@ -3172,6 +3220,17 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                     />
                   </>
                 )}
+                {caamPickerVisible ? (
+                  <>
+                    <Separator orientation="vertical" className="mx-0.5 hidden h-4 sm:block" />
+                    <CaamProfilePicker
+                      profiles={caamToolProfiles}
+                      value={effectiveCaamProfile}
+                      projectDefaultProfile={caamProjectDefault}
+                      onChange={onCaamProfileChange}
+                    />
+                  </>
+                ) : null}
               </div>
 
               {/* Right side: send / stop button */}

@@ -244,6 +244,7 @@ import {
 } from "../state/entities";
 import { environmentShell } from "../state/shell";
 import { ChatComposer, type ChatComposerHandle } from "./chat/ChatComposer";
+import { caamProfileNamesForTool, caamToolForDriverKind } from "../caamProfiles";
 import { DraftHeroHeadline } from "./chat/DraftHeroHeadline";
 import { ExpandedImageDialog } from "./chat/ExpandedImageDialog";
 import { PullRequestThreadDialog } from "./PullRequestThreadDialog";
@@ -3566,6 +3567,7 @@ function ChatViewContent(props: ChatViewProps) {
       createdAt: string;
       modelSelection?: ModelSelection;
       branch?: string;
+      caamProfile?: string | null;
       runtimeMode: RuntimeMode;
       interactionMode: ProviderInteractionMode;
     }): Promise<AtomCommandResult<void, unknown>> => {
@@ -3579,6 +3581,9 @@ function ChatViewContent(props: ChatViewProps) {
         ...(input.modelSelection ? { nextModelSelection: input.modelSelection } : {}),
         currentBranch: serverThread.branch,
         ...(input.branch ? { nextBranch: input.branch } : {}),
+        // The server never echoes the thread's caam selection back, so pass only
+        // the next value; any provided value counts as a change to sync.
+        ...(input.caamProfile !== undefined ? { nextCaamProfile: input.caamProfile } : {}),
       });
       if (metadataUpdate) {
         result = mapAtomCommandResult(
@@ -4915,7 +4920,15 @@ function ChatViewContent(props: ChatViewProps) {
       selectedProviderModels: ctxSelectedProviderModels,
       selectedPromptEffort: ctxSelectedPromptEffort,
       selectedModelSelection: ctxSelectedModelSelection,
+      selectedCaamProfile: ctxSelectedCaamProfile,
     } = sendCtx;
+    // Forward the caam profile only when the picker is applicable to the active
+    // provider's tool; otherwise omit the field entirely.
+    const caamProfileField: { caamProfile?: string | null } =
+      caamProfileNamesForTool(serverConfig?.caam, caamToolForDriverKind(ctxSelectedProvider))
+        .length > 0
+        ? { caamProfile: ctxSelectedCaamProfile }
+        : {};
     const composerImages =
       directAnnotation?.image &&
       !sendContextImages.some((image) => image.id === directAnnotation.image?.id)
@@ -5181,6 +5194,7 @@ function ChatViewContent(props: ChatViewProps) {
         ...(localCheckoutBranchMismatch
           ? { branch: localCheckoutBranchMismatch.currentBranch }
           : {}),
+        ...caamProfileField,
         runtimeMode,
         interactionMode,
       });
@@ -5209,6 +5223,7 @@ function ChatViewContent(props: ChatViewProps) {
                       interactionMode,
                       branch: activeThreadBranch,
                       worktreePath: activeThread.worktreePath,
+                      ...caamProfileField,
                       createdAt: activeThread.createdAt,
                     },
                   }
@@ -5242,6 +5257,7 @@ function ChatViewContent(props: ChatViewProps) {
           runtimeMode,
           interactionMode,
           ...(bootstrap ? { bootstrap } : {}),
+          ...caamProfileField,
           createdAt: messageCreatedAt,
         },
       });
@@ -5516,7 +5532,13 @@ function ChatViewContent(props: ChatViewProps) {
         selectedProviderModels: ctxSelectedProviderModels,
         selectedPromptEffort: ctxSelectedPromptEffort,
         selectedModelSelection: ctxSelectedModelSelection,
+        selectedCaamProfile: ctxSelectedCaamProfile,
       } = sendCtx;
+      const caamProfileField: { caamProfile?: string | null } =
+        caamProfileNamesForTool(serverConfig?.caam, caamToolForDriverKind(ctxSelectedProvider))
+          .length > 0
+          ? { caamProfile: ctxSelectedCaamProfile }
+          : {};
 
       const threadIdForSend = activeThread.id;
       const messageIdForSend = newMessageId();
@@ -5567,6 +5589,7 @@ function ChatViewContent(props: ChatViewProps) {
         ...(localCheckoutBranchMismatch
           ? { branch: localCheckoutBranchMismatch.currentBranch }
           : {}),
+        ...caamProfileField,
         runtimeMode,
         interactionMode: nextInteractionMode,
       });
@@ -5645,6 +5668,7 @@ function ChatViewContent(props: ChatViewProps) {
       startThreadTurn,
       environmentId,
       composerRef,
+      serverConfig,
     ],
   );
 
@@ -5672,7 +5696,13 @@ function ChatViewContent(props: ChatViewProps) {
       selectedProviderModels: ctxSelectedProviderModels,
       selectedPromptEffort: ctxSelectedPromptEffort,
       selectedModelSelection: ctxSelectedModelSelection,
+      selectedCaamProfile: ctxSelectedCaamProfile,
     } = sendCtx;
+    const caamProfileField: { caamProfile?: string | null } =
+      caamProfileNamesForTool(serverConfig?.caam, caamToolForDriverKind(ctxSelectedProvider))
+        .length > 0
+        ? { caamProfile: ctxSelectedCaamProfile }
+        : {};
 
     const createdAt = new Date().toISOString();
     const nextThreadId = newThreadId();
@@ -5706,6 +5736,7 @@ function ChatViewContent(props: ChatViewProps) {
         interactionMode: "default",
         branch: activeThreadBranch,
         worktreePath: activeThread.worktreePath,
+        ...caamProfileField,
         createdAt,
       },
     });
@@ -5731,6 +5762,7 @@ function ChatViewContent(props: ChatViewProps) {
             threadId: activeThread.id,
             planId: activeProposedPlan.id,
           },
+          ...caamProfileField,
           createdAt,
         },
       });
@@ -5803,6 +5835,7 @@ function ChatViewContent(props: ChatViewProps) {
     startThreadTurn,
     environmentId,
     composerRef,
+    serverConfig,
   ]);
 
   const getModelDisabledReason = useCallback(
@@ -6346,6 +6379,7 @@ function ChatViewContent(props: ChatViewProps) {
                               activeProject?.defaultModelSelection
                             }
                             activeThreadModelSelection={activeThread?.modelSelection}
+                            caamProfiles={serverConfig?.caam}
                             activeThreadActivities={activeThread?.activities}
                             resolvedTheme={resolvedTheme}
                             settings={settings}
